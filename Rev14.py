@@ -30,7 +30,6 @@ from flask import Flask, render_template_string, render_template, url_for, redir
 from newsapi import NewsApiClient, newsapi_exception
 from newspaper import Article # newspaper3k for article scraping
 from dotenv import load_dotenv
-from IPython.display import display, HTML # For Jupyter Notebook display (though Flask serves HTML)
 from werkzeug.security import generate_password_hash, check_password_hash # For login
 import groq # For Groq API
 
