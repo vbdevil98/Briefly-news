@@ -121,6 +121,7 @@ print("Cell 2: Initial setup and configuration complete. Jinja DictLoader config
 
 
 # Cell 3: Global Stores and Helper Functions
+
 import hashlib # For generating article IDs
 import json # For parsing JSON responses from Groq
 import time # For caching timestamps and sleep
@@ -128,12 +129,12 @@ import socket # For find_free_port
 from functools import wraps # For cache decorator
 from datetime import datetime, timedelta # For date calculations in news fetching
 import urllib.parse # For URL encoding text in placeholder images
+import requests # <-- ADDED FOR SCRAPERAPI
 
 # For user authentication
 from werkzeug.security import generate_password_hash
 
 from newsapi.newsapi_client import NewsAPIException # Specific exception for NewsAPI
-# MODIFICATION: Import Config from newspaper
 from newspaper import Article, Config
 import nltk # For NLP tasks like sentence tokenization (used in summary fallback)
 
@@ -254,7 +255,6 @@ def get_article_analysis_with_groq(article_text, article_title=""):
             "error": "Groq client not available or no text provided."
         }
 
-    # ... (rest of get_article_analysis_with_groq is unchanged) ...
     app.logger.info(f"Requesting Groq analysis for article (title: {article_title[:50]}...).")
     max_retries = 2
     text_limit = 20000
@@ -266,7 +266,7 @@ def get_article_analysis_with_groq(article_text, article_title=""):
         "2. List 7-8 key takeaways as bullet points. "
         "Format your entire response as a single JSON object with keys 'summary' (string) and 'takeaways' (a list of strings)."
     )
-    user_prompt_content = f"Article Title: {article_title}\n\nArticle Text:\n{truncated_text}"
+    user_prompt_content = f"Article Title: {article_title}\\n\\nArticle Text:\\n{truncated_text}"
 
     lc_messages = [
         SystemMessage(content=system_prompt_content),
@@ -318,7 +318,6 @@ def get_article_analysis_with_groq(article_text, article_title=""):
 def fetch_news_from_api(query=None, category_keyword=None,
                               days_ago=None,
                               page_size=None, lang='en'):
-    # ... (this function is unchanged) ...
     if not newsapi:
         app.logger.error("NewsAPI client not available. Cannot fetch news.")
         return []
@@ -332,7 +331,6 @@ def fetch_news_from_api(query=None, category_keyword=None,
         search_query_parts.append(f"({category_keyword})")
     full_search_query = " AND ".join(search_query_parts)
     
-    # ... (rest of fetch_news_from_api is unchanged) ...
     try:
         response = newsapi.get_everything(q=full_search_query, from_param=from_date, language=lang, sort_by='publishedAt', page_size=final_page_size)
         raw_articles = response.get('articles', [])
@@ -358,15 +356,17 @@ def fetch_news_from_api(query=None, category_keyword=None,
         return []
 
 
+# THIS IS THE MODIFIED FUNCTION THAT USES SCRAPERAPI
 @simple_cache(expiry_seconds_default=3600 * 2)
 def fetch_process_and_analyze_article_content(article_id, url, title=""):
     """
-    Downloads article content using Newspaper3k, parses it, and uses Groq for analysis.
-    Updates MASTER_ARTICLE_STORE.
+    Downloads article content using ScraperAPI to bypass blocks, then parses with Newspaper3k
+    and uses Groq for analysis. Updates MASTER_ARTICLE_STORE.
     """
-    app.logger.info(f"Fetching, processing, and analyzing article ID: {article_id}, URL: {url[:70]}...")
+    app.logger.info(f"Fetching content for article ID: {article_id} via proxy.")
     summary_sentences_count = app.config.get('SUMMARY_SENTENCES', 3)
 
+    # --- Check for fully processed data first ---
     if article_id in MASTER_ARTICLE_STORE:
         cached_master_data = MASTER_ARTICLE_STORE[article_id]
         if cached_master_data.get('full_text') and cached_master_data.get('groq_analysis') and not cached_master_data['groq_analysis'].get('error'):
@@ -378,12 +378,15 @@ def fetch_process_and_analyze_article_content(article_id, url, title=""):
                 cached_master_data['groq_analysis']
             )
 
-    # --- START OF MODIFICATION TO FIX 406 ERROR ---
-    config = Config()
-    # Set a realistic User-Agent to mimic a web browser
-    config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-    config.request_timeout = 10 # Add a timeout for requests
-    # --- END OF MODIFICATION ---
+    # --- ScraperAPI Configuration ---
+    SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY')
+    if not SCRAPER_API_KEY:
+        error_message = "ScraperAPI key is not configured on the server."
+        app.logger.error(error_message)
+        groq_analysis_result = {"groq_summary": "Summary unavailable.", "groq_takeaways": ["Takeaways unavailable."], "error": error_message}
+        return "Article text could not be extracted.", "Scraping service not configured.", 0, groq_analysis_result
+
+    scraperapi_payload = {'api_key': SCRAPER_API_KEY, 'url': url}
 
     full_text = "Article text could not be extracted."
     newspaper_summary = "Newspaper3k summary unavailable."
@@ -391,9 +394,17 @@ def fetch_process_and_analyze_article_content(article_id, url, title=""):
     read_time = 0
 
     try:
-        # MODIFICATION: Pass the config to the Article object
+        # --- Make the request through ScraperAPI ---
+        response = requests.get('http://api.scraperapi.com', params=scraperapi_payload, timeout=45)
+        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+
+        # --- Configure Newspaper3k to parse the downloaded HTML ---
+        config = Config()
+        config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        
         article_scraper = Article(url, config=config)
-        article_scraper.download()
+        # Download the HTML from our successful proxy request instead of making a new request
+        article_scraper.download(input_html=response.text)
         article_scraper.parse()
 
         if article_scraper.text:
@@ -414,20 +425,18 @@ def fetch_process_and_analyze_article_content(article_id, url, title=""):
         if full_text != "Article text could not be extracted." and groq_client:
             groq_analysis_result = get_article_analysis_with_groq(full_text, title)
         else:
-            groq_analysis_result = {"error": "Groq analysis not performed."}
+            groq_analysis_result = {"error": "Groq analysis not performed as no text was extracted."}
             
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"Error calling ScraperAPI for {url}: {e}")
+        error_message = f"Proxy service error: {e}"
+        groq_analysis_result = {"groq_summary": "Summary unavailable.", "groq_takeaways": ["Takeaways unavailable."], "error": error_message}
     except Exception as e:
-        app.logger.error(f"Error processing article {url} with Newspaper3k: {e}")
-        # Pass the specific error to the analysis result for better debugging
-        error_message = f"Article processing error: {e} on URL {url}"
-        full_text = "Article text could not be extracted."
-        groq_analysis_result = {
-            "groq_summary": f"Groq summary unavailable.",
-            "groq_takeaways": [f"Groq takeaways unavailable."],
-            "error": error_message
-        }
-        read_time = 0
+        app.logger.error(f"Error processing article {url} after proxy download: {e}")
+        error_message = f"Article processing error after download: {e}"
+        groq_analysis_result = {"groq_summary": "Summary unavailable.", "groq_takeaways": ["Takeaways unavailable."], "error": error_message}
 
+    # --- Update the master store with the results ---
     if article_id in MASTER_ARTICLE_STORE:
         MASTER_ARTICLE_STORE[article_id].update({
             'full_text': full_text,
@@ -435,14 +444,6 @@ def fetch_process_and_analyze_article_content(article_id, url, title=""):
             'read_time_minutes': read_time,
             'groq_analysis': groq_analysis_result
         })
-    else:
-        # This case is a fallback
-        MASTER_ARTICLE_STORE[article_id] = {
-            'id': article_id, 'url': url, 'title': title,
-            'full_text': full_text, 'newspaper_summary': newspaper_summary,
-            'read_time_minutes': read_time, 'groq_analysis': groq_analysis_result,
-            # ... other necessary fields ...
-        }
 
     return full_text, newspaper_summary, read_time, groq_analysis_result
 
