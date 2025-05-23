@@ -8,3 +8,4 @@ groq
 langchain-groq
 gunicorn
 jinja2
+lxml-html-clean
