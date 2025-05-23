@@ -1,0 +1,10 @@
+Flask
+nltk
+newsapi-python
+newspaper3k
+python-dotenv
+werkzeug
+groq
+langchain-groq
+gunicorn
+jinja2
