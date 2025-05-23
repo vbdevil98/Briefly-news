@@ -11,7 +11,7 @@ import nltk
 try:
     nltk.data.find('tokenizers/punkt')
     print("NLTK 'punkt' tokenizer already downloaded.")
-except nltk.downloader.DownloadError:
+except LookupError:
     print("NLTK 'punkt' tokenizer not found. Downloading...")
     nltk.download('punkt', quiet=True)
     print("NLTK 'punkt' tokenizer downloaded.")
